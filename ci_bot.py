@@ -389,14 +389,40 @@ def fetch_progress():
         return "Initializing..."
     
     try:
-        # Read last 100 lines for efficiency
+        # Read last 200 lines for better coverage
         with open(BUILD_LOG, 'r') as f:
-            lines = f.readlines()[-100:]
+            lines = f.readlines()[-200:]
         
+        # Try multiple patterns to match different build log formats
         for line in reversed(lines):
-            match = re.search(r'(\d+)% (\d+/\d+)', line)
+            # Pattern 1: [ 45% 1300/20000] or [45% 1300/20000]
+            match = re.search(r'\[\s*(\d+)%\s+(\d+)/(\d+)\]', line)
             if match:
-                return f"{match.group(1)}% ({match.group(2)})"
+                percent = match.group(1)
+                current = match.group(2)
+                total = match.group(3)
+                return f"{percent}% ({current}/{total})"
+            
+            # Pattern 2: 45% 1300/20000 (without brackets)
+            match = re.search(r'(\d+)%\s+(\d+)/(\d+)', line)
+            if match:
+                percent = match.group(1)
+                current = match.group(2)
+                total = match.group(3)
+                return f"{percent}% ({current}/{total})"
+            
+            # Pattern 3: [ 45% 1300/20000 remaining]
+            match = re.search(r'\[\s*(\d+)%\s+(\d+)/(\d+)\s+.*remaining', line, re.IGNORECASE)
+            if match:
+                percent = match.group(1)
+                current = match.group(2)
+                total = match.group(3)
+                return f"{percent}% ({current}/{total})"
+        
+        # Check if build is running but no progress yet
+        if any('ninja' in line.lower() or 'soong' in line.lower() or 'build' in line.lower() for line in lines[-10:]):
+            return "Building..."
+        
         return "Initializing the build system..."
     except:
         return "Initializing..."
@@ -447,7 +473,9 @@ def monitor_progress():
                 edit_message(build_message_id, text)
             
             previous_progress = current_progress
-        time.sleep(5)
+        
+        # Update more frequently (every 3 seconds instead of 5)
+        time.sleep(3)
 
 # ============================================================================
 # UPLOAD FUNCTIONS
@@ -821,20 +849,38 @@ def main():
     else:
         print("✅ Build succeeded!")
         
-        # Extract build stats
-        max_actions = 0
+        # Extract build stats - find the maximum total actions
+        max_total = 0
+        last_current = 0
         try:
             with open(BUILD_LOG, 'r') as f:
                 for line in f:
-                    match = re.search(r'\[\s*\d+%\s+(\d+)/(\d+)', line)
+                    # Pattern 1: [ 45% 1300/20000]
+                    match = re.search(r'\[\s*\d+%\s+(\d+)/(\d+)\]', line)
                     if match:
+                        current = int(match.group(1))
                         total = int(match.group(2))
-                        if total > max_actions:
-                            max_actions = total
+                    else:
+                        # Pattern 2: 45% 1300/20000
+                        match = re.search(r'\d+%\s+(\d+)/(\d+)', line)
+                        if match:
+                            current = int(match.group(1))
+                            total = int(match.group(2))
+                        else:
+                            continue
+                    
+                    if total > max_total:
+                        max_total = total
+                    if current > last_current:
+                        last_current = current
         except:
             pass
         
-        build_stats = f"{max_actions}/{max_actions} actions" if max_actions > 0 else "N/A"
+        # Use the last current action count and max total
+        if max_total > 0:
+            build_stats = f"{last_current}/{max_total} actions"
+        else:
+            build_stats = "N/A"
         
         # Find ROM zip
         rom_zip = find_rom_zip()
@@ -844,12 +890,12 @@ def main():
         
         print(f"📦 Found ROM: {os.path.basename(rom_zip)}")
         
-        # Calculate SHA256
-        print("🔍 Calculating SHA256...")
-        sha256_hash = hashlib.sha256()
+        # Calculate MD5
+        print("🔍 Calculating MD5...")
+        md5_hash = hashlib.md5()
         with open(rom_zip, 'rb') as f:
             for chunk in iter(lambda: f.read(8192), b""):
-                sha256_hash.update(chunk)
+                md5_hash.update(chunk)
         
         rom_filename = os.path.basename(rom_zip)
         size_gb = os.path.getsize(rom_zip) / (1024**3)
@@ -896,7 +942,7 @@ def main():
 <b>🔧 Configuration:</b>
 <b>• File:</b> <code>{rom_filename}</code>
 <b>• Size:</b> {size_gb:.2f} GiB
-<b>• SHA256:</b> <code>{sha256_hash.hexdigest()}</code>"""
+<b>• MD5:</b> <code>{md5_hash.hexdigest()}</code>"""
         
         download_buttons = create_download_buttons(rom_url, boot_images if boot_images else None)
         
