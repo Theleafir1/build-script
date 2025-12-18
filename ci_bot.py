@@ -14,6 +14,7 @@ import signal
 import argparse
 import hashlib
 import shutil
+import json
 from pathlib import Path
 from threading import Thread
 from io import BytesIO
@@ -50,8 +51,8 @@ RCLONE_FOLDER = ""              # Folder path in remote (leave "" if remote poin
 # Power Management
 POWEROFF = False                # Set to True to shutdown server after build completes
 
-# Banner Configuration (Optional)
-BANNER_THEME = "deepSpace"      # Banner theme: deepSpace, sunset, ocean, forest, matrix, cyberpunk
+# Termbin Configuration (Optional)
+UPLOAD_OTA_JSON = False         # Set to True to upload error logs to termbin.com
 
 # ============================================================================
 # GLOBALS
@@ -77,72 +78,59 @@ TELEGRAM_BASE_URL = f"https://api.telegram.org/bot{CONFIG_BOT_TOKEN}"
 class BannerGenerator:
     """Self-hosted banner generator - no external API needed!"""
     
-    THEMES = {
-        'deepSpace': {
-            'gradient_start': '#1a0b2e',
-            'gradient_end': '#2d1b4e',
-            'accent': '#7b2cbf',
-            'text_primary': '#ffffff',
-            'text_secondary': '#a8b2d1',
-        },
-        'sunset': {
-            'gradient_start': '#ff6b35',
-            'gradient_end': '#f7931e',
-            'accent': '#c1121f',
-            'text_primary': '#ffffff',
-            'text_secondary': '#ffe5d9',
-        },
-        'ocean': {
-            'gradient_start': '#03045e',
-            'gradient_end': '#0077b6',
-            'accent': '#00b4d8',
-            'text_primary': '#ffffff',
-            'text_secondary': '#caf0f8',
-        },
-        'forest': {
-            'gradient_start': '#1b4332',
-            'gradient_end': '#2d6a4f',
-            'accent': '#52b788',
-            'text_primary': '#ffffff',
-            'text_secondary': '#d8f3dc',
-        },
-        'matrix': {
-            'gradient_start': '#000000',
-            'gradient_end': '#0d1b0d',
-            'accent': '#00ff00',
-            'text_primary': '#00ff00',
-            'text_secondary': '#00cc00',
-        },
-        'cyberpunk': {
-            'gradient_start': '#0a0e27',
-            'gradient_end': '#1a1a2e',
-            'accent': '#ff2e97',
-            'text_primary': '#00fff9',
-            'text_secondary': '#ff2e97',
-        },
-    }
-    
     def __init__(self, width=1200, height=630):
         self.width = width
         self.height = height
     
-    def hex_to_rgb(self, hex_color):
-        """Convert hex color to RGB tuple"""
-        hex_color = hex_color.lstrip('#')
-        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-    
-    def create_gradient(self, start_color, end_color):
-        """Create a vertical gradient background"""
-        base = Image.new('RGB', (self.width, self.height), start_color)
-        top = Image.new('RGB', (self.width, self.height), end_color)
-        mask = Image.new('L', (self.width, self.height))
-        mask_data = []
-        for y in range(self.height):
-            for x in range(self.width):
-                mask_data.append(int(255 * (y / self.height)))
-        mask.putdata(mask_data)
-        base.paste(top, (0, 0), mask)
-        return base
+    def get_dominant_colors(self, image, num_colors=3):
+        """
+        Extract multiple dominant colors from image using color clustering.
+        Returns a list of (r, g, b) tuples.
+        """
+        try:
+            img = image.convert('RGB').resize((100, 100), Image.Resampling.LANCZOS)
+            pixels = list(img.getdata())
+            
+            # Filter out very dark/black pixels
+            filtered = [p for p in pixels if max(p) > 40]
+            if not filtered:
+                filtered = pixels
+            
+            # Simple k-means-like clustering to find dominant colors
+            # Start with random colors from the image
+            import random
+            random.seed(42)
+            centroids = random.sample(filtered, min(num_colors, len(filtered)))
+            
+            # Iterate a few times to refine
+            for _ in range(5):
+                clusters = [[] for _ in range(len(centroids))]
+                
+                # Assign each pixel to nearest centroid
+                for pixel in filtered:
+                    distances = [
+                        sum((pixel[i] - c[i]) ** 2 for i in range(3))
+                        for c in centroids
+                    ]
+                    closest = distances.index(min(distances))
+                    clusters[closest].append(pixel)
+                
+                # Update centroids
+                for i, cluster in enumerate(clusters):
+                    if cluster:
+                        centroids[i] = tuple(
+                            sum(p[j] for p in cluster) // len(cluster)
+                            for j in range(3)
+                        )
+            
+            # Sort by cluster size (most prominent first)
+            cluster_sizes = [len(c) for c in clusters]
+            sorted_centroids = [c for _, c in sorted(zip(cluster_sizes, centroids), reverse=True)]
+            
+            return sorted_centroids[:num_colors]
+        except Exception as _e:
+            # Fallback colors
+            return [(201, 253, 211), (100, 180, 255), (180, 100, 255)]
     
     def fetch_avatar(self, avatar_url):
         """Fetch and process avatar image"""
@@ -156,18 +144,46 @@ class BannerGenerator:
         return None
     
     def create_circular_avatar(self, avatar, size=200):
-        """Create circular avatar with glow effect"""
-        avatar = avatar.resize((size, size), Image.Resampling.LANCZOS)
+        """Create circular avatar - simple approach like reference API"""
+        # Convert to RGBA
+        if avatar.mode != 'RGBA':
+            avatar = avatar.convert('RGBA')
         
-        # Create circular mask
+        # Remove white backgrounds (for logos like VoltageOS)
+        data = list(avatar.getdata())
+        new_data = []
+        for item in data:
+            r, g, b = item[0], item[1], item[2]
+            if r > 240 and g > 240 and b > 240:
+                new_data.append((r, g, b, 0))
+            else:
+                new_data.append(item)
+        avatar.putdata(new_data)
+        
+        # Simple 15% padding for all logos
+        padding = int(size * 0.15)
+        inner_size = size - (padding * 2)
+        
+        # Resize maintaining aspect ratio
+        avatar.thumbnail((inner_size, inner_size), Image.Resampling.LANCZOS)
+        
+        # White circular background
+        background = Image.new('RGBA', (size, size), (255, 255, 255, 255))
+        
+        # Center logo
+        x_offset = (size - avatar.width) // 2
+        y_offset = (size - avatar.height) // 2
+        background.paste(avatar, (x_offset, y_offset), avatar)
+        
+        # Circular mask
         mask = Image.new('L', (size, size), 0)
         mask_draw = ImageDraw.Draw(mask)
         mask_draw.ellipse((0, 0, size, size), fill=255)
         
         # Apply mask
-        circular = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-        circular.paste(avatar, (0, 0))
-        circular.putalpha(mask)
+        output = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        output.paste(background, (0, 0))
+        output.putalpha(mask)
         
         # Create glow effect
         glow_size = size + 40
@@ -183,7 +199,7 @@ class BannerGenerator:
             )
         
         # Paste circular avatar on glow
-        glow.paste(circular, (20, 20), circular)
+        glow.paste(output, (20, 20), output)
         return glow
     
     def get_font(self, size, bold=False):
@@ -202,54 +218,141 @@ class BannerGenerator:
                     pass
         return ImageFont.load_default()
     
-    def generate(self, title, avatar_url, theme='deepSpace', device='', version=''):
-        """Generate banner image - clean layout with logo, ROM name, device, and Android version"""
-        theme_colors = self.THEMES.get(theme, self.THEMES['deepSpace'])
+    def generate(self, title, avatar_url, device='', version=''):
+        """
+        Generate clean modern banner with glassmorphism:
+        - Gradient background derived from ROM logo
+        - Clean centered glassmorphism card
+        - Logo on left, ROM name + device/Android on right
+        """
+        text_primary = (255, 255, 255, 255)
+        text_secondary = (200, 210, 230, 255)
         
-        # Create gradient background
-        start_rgb = self.hex_to_rgb(theme_colors['gradient_start'])
-        end_rgb = self.hex_to_rgb(theme_colors['gradient_end'])
-        image = self.create_gradient(start_rgb, end_rgb)
+        # Fetch avatar and extract multiple dominant colors
+        raw_avatar = self.fetch_avatar(avatar_url)
+        if raw_avatar:
+            colors = self.get_dominant_colors(raw_avatar, num_colors=3)
+            # Use first color for primary accent
+            accent = colors[0]
+        else:
+            colors = [(201, 253, 211), (100, 180, 255), (180, 100, 255)]
+            accent = colors[0]
+        
+        # Create multi-color gradient background using extracted colors
+        # Darken them for background
+        darkened = [tuple(max(0, int(c * 0.15)) for c in color) for color in colors]
+        lightened = [tuple(min(255, int(c * 0.45)) for c in color) for color in colors]
+        
+        # Build gradient that transitions through multiple colors
+        image = Image.new('RGB', (self.width, self.height))
+        for y in range(self.height):
+            # Determine which color pair we're transitioning between
+            progress = y / self.height
+            
+            if progress < 0.5:
+                # First half: transition from color 0 to color 1
+                local_blend = progress * 2
+                color = tuple(
+                    int(darkened[0][i] * (1 - local_blend) + lightened[0 if len(darkened) == 1 else 1][i] * local_blend)
+                    for i in range(3)
+                )
+            else:
+                # Second half: transition from color 1 to color 2
+                local_blend = (progress - 0.5) * 2
+                start_color = lightened[0 if len(lightened) == 1 else 1]
+                end_color = lightened[1 if len(lightened) < 3 else 2]
+                color = tuple(
+                    int(start_color[i] * (1 - local_blend) + end_color[i] * local_blend)
+                    for i in range(3)
+                )
+            
+            for x in range(self.width):
+                image.putpixel((x, y), color)
+        
         image = image.convert('RGBA')
         
-        overlay = Image.new('RGBA', (self.width, self.height), (255, 255, 255, 0))
+        # Create glassmorphism card in center
+        card_margin = 60
+        card_layer = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 0))
+        card_draw = ImageDraw.Draw(card_layer)
+        card_draw.rounded_rectangle(
+            (card_margin, card_margin, self.width - card_margin, self.height - card_margin),
+            radius=30,
+            fill=(255, 255, 255, 25),  # very transparent white for glass effect
+            outline=(255, 255, 255, 60),  # subtle border
+            width=2
+        )
+        card_layer = card_layer.filter(ImageFilter.GaussianBlur(1))
+        image = Image.alpha_composite(image, card_layer)
         
-        # Fetch and add avatar (logo)
-        avatar = self.fetch_avatar(avatar_url)
-        logo_size = 280
-        if avatar:
-            circular_avatar = self.create_circular_avatar(avatar, logo_size)
-            # Center logo on left side
-            avatar_x = 120
-            avatar_y = (self.height - circular_avatar.height) // 2
-            overlay.paste(circular_avatar, (avatar_x, avatar_y), circular_avatar)
+        # Place logo with glow
+        logo_size = 200
+        if raw_avatar:
+            circular = self.create_circular_avatar(raw_avatar, logo_size)
+            logo_x = 120
+            logo_y = (self.height - circular.height) // 2
+            
+            # Accent glow behind logo
+            glow_layer = Image.new('RGBA', image.size, (0, 0, 0, 0))
+            glow_draw = ImageDraw.Draw(glow_layer)
+            glow_radius = logo_size
+            glow_center = (logo_x + circular.width // 2, logo_y + circular.height // 2)
+            glow_draw.ellipse(
+                (
+                    glow_center[0] - glow_radius,
+                    glow_center[1] - glow_radius,
+                    glow_center[0] + glow_radius,
+                    glow_center[1] + glow_radius,
+                ),
+                fill=(accent[0], accent[1], accent[2], 80),
+            )
+            glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(40))
+            image = Image.alpha_composite(image, glow_layer)
+            
+            image.paste(circular, (logo_x, logo_y), circular)
         
-        image = Image.alpha_composite(image, overlay)
-        image = image.convert('RGB')
         draw = ImageDraw.Draw(image)
         
-        # Text position (right side of logo)
-        text_start_x = 520
+        # Text positioning
+        text_start_x = 400
+        title_y = self.height // 2 - 60
         
-        # Draw ROM name (large, bold)
-        title_font = self.get_font(90, bold=True)
-        title_y = 220
-        draw.text((text_start_x, title_y), title.upper(), 
-                 fill=theme_colors['text_primary'], font=title_font)
+        title_font = self.get_font(85, bold=True)
+        info_font = self.get_font(40)
         
-        # Draw device and Android version info below ROM name
+        # ROM name (uppercase)
+        title_text = title.upper()
+        max_width = self.width - text_start_x - 100
+        while True:
+            bbox = draw.textbbox((0, 0), title_text, font=title_font)
+            width = bbox[2] - bbox[0]
+            if width <= max_width or len(title_text) <= 4:
+                break
+            title_text = title_text[:-4] + "..."
+        
+        draw.text(
+            (text_start_x, title_y),
+            title_text,
+            fill=text_primary,
+            font=title_font,
+        )
+        
+        # Device: codename | Android version
         info_parts = []
         if device:
             info_parts.append(f"Device: {device}")
         if version:
             info_parts.append(f"Android {version}")
+        info_text = " | ".join(info_parts)
         
-        if info_parts:
-            info_text = " | ".join(info_parts)
-            info_font = self.get_font(36)
-            info_y = title_y + 110
-            draw.text((text_start_x, info_y), info_text, 
-                     fill=theme_colors['text_secondary'], font=info_font)
+        if info_text:
+            info_y = title_y + 105
+            draw.text(
+                (text_start_x, info_y),
+                info_text,
+                fill=text_secondary,
+                font=info_font,
+            )
         
         return image
     
@@ -368,7 +471,6 @@ def generate_build_banner():
         image = generator.generate(
             title=ROM_NAME,
             avatar_url=GITHUB_ORG_AVATAR if GITHUB_ORG_AVATAR else 'https://avatars.githubusercontent.com/u/0?v=4',
-            theme=BANNER_THEME,
             device=DEVICE,
             version=ANDROID_VERSION
         )
@@ -586,6 +688,44 @@ def upload_file(file_path):
             return url
     url = upload_gofile(file_path)
     return url if url else "Upload failed"
+
+def upload_termbin(file_path):
+    """Upload file content to termbin.com"""
+    if not os.path.exists(file_path):
+        return None
+    
+    # Check if netcat (nc) is available
+    nc_check = subprocess.run(['which', 'nc'], capture_output=True)
+    if nc_check.returncode != 0:
+        print("⚠️  'nc' (netcat) not found. Install with: sudo apt install netcat-openbsd")
+        return None
+    
+    try:
+        print(f"📤 Uploading to termbin.com: {os.path.basename(file_path)}")
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        # Use netcat to upload to termbin
+        process = subprocess.Popen(
+            ['nc', 'termbin.com', '9999'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate(input=content, timeout=30)
+        
+        if process.returncode == 0 and stdout.strip():
+            url = stdout.strip()
+            print(f"✅ Termbin URL: {url}")
+            return url
+        else:
+            print(f"❌ Termbin upload failed: {stderr}")
+    except subprocess.TimeoutExpired:
+        print("❌ Termbin upload timed out")
+    except Exception as e:
+        print(f"❌ Termbin upload error: {e}")
+    return None
 
 def find_rom_zip():
     """Find the main ROM zip file"""
@@ -842,6 +982,7 @@ def main():
 <i>Check logs below</i>"""
         update_telegram_status(fail_msg)
         
+        # Always send error.log and full build.log to Telegram error chat (if present)
         if os.path.exists(error_log):
             send_file(error_log, CONFIG_ERROR_CHATID)
         if os.path.exists(BUILD_LOG):
@@ -898,7 +1039,8 @@ def main():
                 md5_hash.update(chunk)
         
         rom_filename = os.path.basename(rom_zip)
-        size_gb = os.path.getsize(rom_zip) / (1024**3)
+        rom_size_bytes = os.path.getsize(rom_zip)
+        size_gb = rom_size_bytes / (1024**3)
         hours, remainder = divmod(build_duration, 3600)
         minutes, seconds = divmod(remainder, 60)
         
@@ -929,6 +1071,77 @@ def main():
                     print(f"📤 Uploading {img_name}...")
                     boot_images[img_name] = upload_file(img_path)
         
+        # Upload OTA JSON for AxionAOSP builds
+        ota_json_url = None
+        if ROM_TYPE.startswith('axion-'):
+            gms_type = ROM_TYPE.split('-')[1]
+            # Map pico/core to GMS, vanilla to VANILLA
+            ota_dir = 'GMS' if gms_type in ['pico', 'core'] else 'VANILLA'
+            # OTA JSON is named as {device}.json (e.g., begonia.json)
+            ota_json_path = os.path.join(OUT_DIR, ota_dir, f'{DEVICE}.json')
+            
+            if os.path.exists(ota_json_path):
+                if UPLOAD_OTA_JSON:
+                    # Upload OTA JSON content to termbin.com
+                    print(f"📤 Uploading OTA JSON ({ota_dir}) to termbin.com...")
+                    termbin_url = upload_termbin(ota_json_path)
+                    if termbin_url:
+                        ota_json_url = termbin_url
+                        print(f"✅ OTA JSON termbin URL: {ota_json_url}")
+                else:
+                    # Fallback: upload via rclone/GoFile
+                    print(f"📤 Uploading OTA JSON ({ota_dir})...")
+                    ota_json_url = upload_file(ota_json_path)
+                    if ota_json_url:
+                        print(f"✅ OTA JSON uploaded: {ota_json_url}")
+            else:
+                print(f"⚠️  OTA JSON not found at: {ota_json_path}")
+        else:
+            # Generate OTA JSON for non-Axion ROMs
+            print("📝 Generating OTA JSON...")
+            
+            # Extract version from filename or use Android version
+            version_match = re.search(r'[-_](\d+\.\d+(?:\.\d+)?)', rom_filename)
+            version = version_match.group(1) if version_match else ANDROID_VERSION
+            
+            # Determine ROM type
+            romtype = "OFFICIAL" if CONFIG_OFFICIAL_FLAG == '1' else "UNOFFICIAL"
+            
+            # Create OTA JSON structure
+            ota_data = {
+                "response": [
+                    {
+                        "datetime": int(time.time()),
+                        "filename": rom_filename,
+                        "id": md5_hash.hexdigest(),
+                        "romtype": romtype,
+                        "size": rom_size_bytes,
+                        "url": "",
+                        "version": version
+                    }
+                ]
+            }
+            
+            # Save OTA JSON
+            ota_json_path = os.path.join(OUT_DIR, f'{DEVICE}.json')
+            with open(ota_json_path, 'w') as f:
+                json.dump(ota_data, f, indent=4)
+            
+            print(f"✅ OTA JSON generated: {ota_json_path}")
+            
+            # Upload OTA JSON: termbin (if enabled) or regular upload
+            if UPLOAD_OTA_JSON:
+                print("📤 Uploading OTA JSON to termbin.com...")
+                termbin_url = upload_termbin(ota_json_path)
+                if termbin_url:
+                    ota_json_url = termbin_url
+                    print(f"✅ OTA JSON termbin URL: {ota_json_url}")
+            else:
+                print("📤 Uploading OTA JSON...")
+                ota_json_url = upload_file(ota_json_path)
+                if ota_json_url:
+                    print(f"✅ OTA JSON uploaded: {ota_json_url}")
+        
         # Final success message
         success_msg = f"""<b>✅ {ROM_NAME} Build Complete!</b>
 
@@ -943,6 +1156,10 @@ def main():
 <b>• File:</b> <code>{rom_filename}</code>
 <b>• Size:</b> {size_gb:.2f} GiB
 <b>• MD5:</b> <code>{md5_hash.hexdigest()}</code>"""
+        
+        # Add OTA JSON link if available
+        if ota_json_url:
+            success_msg += f"\n\n<b>📱 OTA JSON:</b> <a href=\"{ota_json_url}\">Download</a>"
         
         download_buttons = create_download_buttons(rom_url, boot_images if boot_images else None)
         

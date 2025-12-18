@@ -73,9 +73,6 @@ RCLONE_REMOTE = ""
 # Set your rclone folder name for uploading with rclone
 RCLONE_FOLDER = ""
 
-# Banner theme (Optional)
-BANNER_THEME = "deepSpace"  # deepSpace, sunset, ocean, forest, matrix, cyberpunk
-
 # Turn off server after build (save resource) [False/True]
 POWEROFF = False
 ```
@@ -97,5 +94,3 @@ sudo apt install rclone git
 
 Initial reference and base taken from  
 [Build-Script](https://github.com/hipexscape/Build-Script) by [hipexscape](https://github.com/hipexscape).
-
-Banner idea/reference by [Shra1V32](https://github.com/Shra1V32).
