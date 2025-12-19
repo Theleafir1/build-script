@@ -75,6 +75,12 @@ RCLONE_FOLDER = ""
 
 # Turn off server after build (save resource) [False/True]
 POWEROFF = False
+
+# Upload OTA JSON to termbin.com [True/False]
+UPLOAD_OTA_JSON = True
+
+# Pin success message in chat [True/False]
+PIN_SUCCESS_MESSAGE = True
 ```
 
 ### Requirements
@@ -88,6 +94,9 @@ sudo pacman -S python-requests python-pillow
 
 # Optional: Install rclone for cloud uploads
 sudo apt install rclone git
+
+# Required only if UPLOAD_OTA_JSON = True
+sudo apt install netcat-openbsd
 ```
 
 ### Credits

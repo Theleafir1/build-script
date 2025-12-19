@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from threading import Thread
 from io import BytesIO
+from html import escape as html_escape
 
 # Try to import PIL for banner generation
 try:
@@ -51,8 +52,11 @@ RCLONE_FOLDER = ""              # Folder path in remote (leave "" if remote poin
 # Power Management
 POWEROFF = False                # Set to True to shutdown server after build completes
 
-# Termbin Configuration (Optional)
-UPLOAD_OTA_JSON = False         # Set to True to upload error logs to termbin.com
+# OTA JSON Upload(Optional)
+UPLOAD_OTA_JSON = True          # Set to True to upload OTA JSON to termbin.com
+
+# Pin Message Configuration
+PIN_SUCCESS_MESSAGE = True      # Set to True to pin success message in chat
 
 # ============================================================================
 # GLOBALS
@@ -83,62 +87,36 @@ class BannerGenerator:
         self.height = height
     
     def get_dominant_colors(self, image, num_colors=3):
-        """
-        Extract multiple dominant colors from image using color clustering.
-        Returns a list of (r, g, b) tuples.
-        """
+        """Extract dominant colors using k-means clustering"""
         try:
-            img = image.convert('RGB').resize((100, 100), Image.Resampling.LANCZOS)
-            pixels = list(img.getdata())
-            
-            # Filter out very dark/black pixels
-            filtered = [p for p in pixels if max(p) > 40]
-            if not filtered:
-                filtered = pixels
-            
-            # Simple k-means-like clustering to find dominant colors
-            # Start with random colors from the image
             import random
             random.seed(42)
-            centroids = random.sample(filtered, min(num_colors, len(filtered)))
             
-            # Iterate a few times to refine
+            img = image.convert('RGB').resize((100, 100), Image.Resampling.LANCZOS)
+            pixels = [p for p in img.getdata() if max(p) > 40] or list(img.getdata())
+            centroids = random.sample(pixels, min(num_colors, len(pixels)))
+            
             for _ in range(5):
                 clusters = [[] for _ in range(len(centroids))]
+                for pixel in pixels:
+                    distances = [sum((pixel[i] - c[i]) ** 2 for i in range(3)) for c in centroids]
+                    clusters[distances.index(min(distances))].append(pixel)
                 
-                # Assign each pixel to nearest centroid
-                for pixel in filtered:
-                    distances = [
-                        sum((pixel[i] - c[i]) ** 2 for i in range(3))
-                        for c in centroids
-                    ]
-                    closest = distances.index(min(distances))
-                    clusters[closest].append(pixel)
-                
-                # Update centroids
                 for i, cluster in enumerate(clusters):
                     if cluster:
-                        centroids[i] = tuple(
-                            sum(p[j] for p in cluster) // len(cluster)
-                            for j in range(3)
-                        )
+                        centroids[i] = tuple(sum(p[j] for p in cluster) // len(cluster) for j in range(3))
             
-            # Sort by cluster size (most prominent first)
             cluster_sizes = [len(c) for c in clusters]
-            sorted_centroids = [c for _, c in sorted(zip(cluster_sizes, centroids), reverse=True)]
-            
-            return sorted_centroids[:num_colors]
-        except Exception as _e:
-            # Fallback colors
+            return [c for _, c in sorted(zip(cluster_sizes, centroids), reverse=True)][:num_colors]
+        except:
             return [(201, 253, 211), (100, 180, 255), (180, 100, 255)]
     
     def fetch_avatar(self, avatar_url):
-        """Fetch and process avatar image"""
+        """Fetch avatar image"""
         try:
             response = requests.get(avatar_url, timeout=10)
             if response.status_code == 200:
-                avatar = Image.open(BytesIO(response.content))
-                return avatar
+                return Image.open(BytesIO(response.content))
         except Exception as e:
             print(f"Could not fetch avatar: {e}")
         return None
@@ -219,125 +197,75 @@ class BannerGenerator:
         return ImageFont.load_default()
     
     def generate(self, title, avatar_url, device='', version=''):
-        """
-        Generate clean modern banner with glassmorphism:
-        - Gradient background derived from ROM logo
-        - Clean centered glassmorphism card
-        - Logo on left, ROM name + device/Android on right
-        """
+        """Generate modern glassmorphism banner with dynamic colors from ROM logo"""
         text_primary = (255, 255, 255, 255)
         text_secondary = (200, 210, 230, 255)
         
-        # Fetch avatar and extract multiple dominant colors
         raw_avatar = self.fetch_avatar(avatar_url)
         if raw_avatar:
             colors = self.get_dominant_colors(raw_avatar, num_colors=3)
-            # Use first color for primary accent
             accent = colors[0]
         else:
             colors = [(201, 253, 211), (100, 180, 255), (180, 100, 255)]
             accent = colors[0]
         
-        # Create multi-color gradient background using extracted colors
-        # Darken them for background
         darkened = [tuple(max(0, int(c * 0.15)) for c in color) for color in colors]
         lightened = [tuple(min(255, int(c * 0.45)) for c in color) for color in colors]
         
-        # Build gradient that transitions through multiple colors
         image = Image.new('RGB', (self.width, self.height))
         for y in range(self.height):
-            # Determine which color pair we're transitioning between
             progress = y / self.height
-            
             if progress < 0.5:
-                # First half: transition from color 0 to color 1
                 local_blend = progress * 2
-                color = tuple(
-                    int(darkened[0][i] * (1 - local_blend) + lightened[0 if len(darkened) == 1 else 1][i] * local_blend)
-                    for i in range(3)
-                )
+                color = tuple(int(darkened[0][i] * (1 - local_blend) + lightened[0 if len(darkened) == 1 else 1][i] * local_blend) for i in range(3))
             else:
-                # Second half: transition from color 1 to color 2
                 local_blend = (progress - 0.5) * 2
                 start_color = lightened[0 if len(lightened) == 1 else 1]
                 end_color = lightened[1 if len(lightened) < 3 else 2]
-                color = tuple(
-                    int(start_color[i] * (1 - local_blend) + end_color[i] * local_blend)
-                    for i in range(3)
-                )
-            
+                color = tuple(int(start_color[i] * (1 - local_blend) + end_color[i] * local_blend) for i in range(3))
             for x in range(self.width):
                 image.putpixel((x, y), color)
         
         image = image.convert('RGBA')
         
-        # Create glassmorphism card in center
         card_margin = 60
         card_layer = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 0))
         card_draw = ImageDraw.Draw(card_layer)
         card_draw.rounded_rectangle(
             (card_margin, card_margin, self.width - card_margin, self.height - card_margin),
-            radius=30,
-            fill=(255, 255, 255, 25),  # very transparent white for glass effect
-            outline=(255, 255, 255, 60),  # subtle border
-            width=2
+            radius=30, fill=(255, 255, 255, 25), outline=(255, 255, 255, 60), width=2
         )
-        card_layer = card_layer.filter(ImageFilter.GaussianBlur(1))
-        image = Image.alpha_composite(image, card_layer)
+        image = Image.alpha_composite(image, card_layer.filter(ImageFilter.GaussianBlur(1)))
         
-        # Place logo with glow
         logo_size = 200
         if raw_avatar:
             circular = self.create_circular_avatar(raw_avatar, logo_size)
-            logo_x = 120
-            logo_y = (self.height - circular.height) // 2
+            logo_x, logo_y = 120, (self.height - circular.height) // 2
             
-            # Accent glow behind logo
             glow_layer = Image.new('RGBA', image.size, (0, 0, 0, 0))
-            glow_draw = ImageDraw.Draw(glow_layer)
-            glow_radius = logo_size
             glow_center = (logo_x + circular.width // 2, logo_y + circular.height // 2)
-            glow_draw.ellipse(
-                (
-                    glow_center[0] - glow_radius,
-                    glow_center[1] - glow_radius,
-                    glow_center[0] + glow_radius,
-                    glow_center[1] + glow_radius,
-                ),
-                fill=(accent[0], accent[1], accent[2], 80),
+            ImageDraw.Draw(glow_layer).ellipse(
+                (glow_center[0] - logo_size, glow_center[1] - logo_size,
+                 glow_center[0] + logo_size, glow_center[1] + logo_size),
+                fill=(accent[0], accent[1], accent[2], 80)
             )
-            glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(40))
-            image = Image.alpha_composite(image, glow_layer)
-            
+            image = Image.alpha_composite(image, glow_layer.filter(ImageFilter.GaussianBlur(40)))
             image.paste(circular, (logo_x, logo_y), circular)
         
         draw = ImageDraw.Draw(image)
+        text_start_x, title_y = 400, self.height // 2 - 60
+        title_font, info_font = self.get_font(85, bold=True), self.get_font(40)
         
-        # Text positioning
-        text_start_x = 400
-        title_y = self.height // 2 - 60
-        
-        title_font = self.get_font(85, bold=True)
-        info_font = self.get_font(40)
-        
-        # ROM name (uppercase)
         title_text = title.upper()
         max_width = self.width - text_start_x - 100
         while True:
             bbox = draw.textbbox((0, 0), title_text, font=title_font)
-            width = bbox[2] - bbox[0]
-            if width <= max_width or len(title_text) <= 4:
+            if bbox[2] - bbox[0] <= max_width or len(title_text) <= 4:
                 break
             title_text = title_text[:-4] + "..."
         
-        draw.text(
-            (text_start_x, title_y),
-            title_text,
-            fill=text_primary,
-            font=title_font,
-        )
+        draw.text((text_start_x, title_y), title_text, fill=text_primary, font=title_font)
         
-        # Device: codename | Android version
         info_parts = []
         if device:
             info_parts.append(f"Device: {device}")
@@ -346,13 +274,7 @@ class BannerGenerator:
         info_text = " | ".join(info_parts)
         
         if info_text:
-            info_y = title_y + 105
-            draw.text(
-                (text_start_x, info_y),
-                info_text,
-                fill=text_secondary,
-                font=info_font,
-            )
+            draw.text((text_start_x, title_y + 105), info_text, fill=text_secondary, font=info_font)
         
         return image
     
@@ -374,9 +296,13 @@ def telegram_request(endpoint, data=None, files=None, timeout=30):
         else:
             response = requests.post(url, json=data, timeout=timeout)
         result = response.json()
-        return result if result.get('ok') else None
+        if result.get('ok'):
+            return result
+        else:
+            print(f"Telegram API error ({endpoint}): {result.get('description', 'Unknown error')}", file=sys.stderr)
+            return None
     except Exception as e:
-        print(f"Telegram API error: {e}", file=sys.stderr)
+        print(f"Telegram API exception ({endpoint}): {e}", file=sys.stderr)
         return None
 
 def send_message(text, chat_id=None):
@@ -421,7 +347,10 @@ def edit_message(message_id, text, chat_id=None, reply_markup=None):
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
-    telegram_request('editMessageText', data=data)
+    result = telegram_request('editMessageText', data=data)
+    if not result:
+        print(f"⚠️  Failed to edit message {message_id}", file=sys.stderr)
+    return result
 
 def edit_photo_caption(message_id, caption, chat_id=None, reply_markup=None):
     """Edit photo caption"""
@@ -433,7 +362,22 @@ def edit_photo_caption(message_id, caption, chat_id=None, reply_markup=None):
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
-    telegram_request('editMessageCaption', data=data)
+    result = telegram_request('editMessageCaption', data=data)
+    if not result:
+        print(f"⚠️  Failed to edit photo caption {message_id}", file=sys.stderr)
+    return result
+
+def pin_message(message_id, chat_id=None):
+    """Pin a message in the chat"""
+    data = {
+        'chat_id': chat_id or CONFIG_CHATID,
+        'message_id': message_id,
+        'disable_notification': True
+    }
+    result = telegram_request('pinChatMessage', data=data)
+    if not result:
+        print(f"⚠️  Failed to pin message {message_id}", file=sys.stderr)
+    return result
 
 def create_download_buttons(rom_url, boot_images=None):
     """Create inline keyboard with download buttons"""
@@ -491,34 +435,51 @@ def fetch_progress():
         return "Initializing..."
     
     try:
-        # Read last 200 lines for better coverage
         with open(BUILD_LOG, 'r') as f:
             lines = f.readlines()[-200:]
+        
+        # Check last 100 lines for OTA packaging indicators
+        for line in reversed(lines[:100]):
+            # OTA packaging indicators
+            if 'add_img_to_target_files.py' in line and 'done' in line:
+                return "📦 Packing final ROM..."
+            
+            if 'Compressing' in line and ('with brotli' in line or '.new.dat' in line):
+                return "📦 Packing final ROM..."
+            
+            if 'build out/target/product' in line and '.zip' in line:
+                return "📦 Packing final ROM..."
+            
+            if 'ota_from_target_files' in line.lower() or 'ota-from-target-files' in line.lower():
+                return "📦 Packing final ROM..."
+            
+            if 'Package Complete:' in line or 'BUILD COMPLETED SUCCESSFULLY' in line:
+                return "📦 Packing final ROM..."
+            
+            if 'Writing full OTA package' in line or 'Generating OTA' in line:
+                return "📦 Packing final ROM..."
+            
+            if 'Running:' in line and 'ota_from_target_files' in line:
+                return "📦 Packing final ROM..."
         
         # Try multiple patterns to match different build log formats
         for line in reversed(lines):
             # Pattern 1: [ 45% 1300/20000] or [45% 1300/20000]
             match = re.search(r'\[\s*(\d+)%\s+(\d+)/(\d+)\]', line)
             if match:
-                percent = match.group(1)
-                current = match.group(2)
-                total = match.group(3)
+                percent, current, total = match.groups()
                 return f"{percent}% ({current}/{total})"
             
             # Pattern 2: 45% 1300/20000 (without brackets)
             match = re.search(r'(\d+)%\s+(\d+)/(\d+)', line)
             if match:
-                percent = match.group(1)
-                current = match.group(2)
-                total = match.group(3)
+                percent, current, total = match.groups()
                 return f"{percent}% ({current}/{total})"
             
             # Pattern 3: [ 45% 1300/20000 remaining]
             match = re.search(r'\[\s*(\d+)%\s+(\d+)/(\d+)\s+.*remaining', line, re.IGNORECASE)
             if match:
-                percent = match.group(1)
-                current = match.group(2)
-                total = match.group(3)
+                percent, current, total = match.groups()
                 return f"{percent}% ({current}/{total})"
         
         # Check if build is running but no progress yet
@@ -631,7 +592,7 @@ def upload_rclone(file_path):
         
         while True:
             check_path = f'{base_path}/{file_name}'
-            result = subprocess.run(['rclone', 'lsf', check_path], capture_output=True, text=True)
+            result = subprocess.run(['rclone', 'lsf', check_path], capture_output=True, text=True, timeout=10)
             
             if result.returncode == 0 and result.stdout.strip():
                 version += 1
@@ -650,18 +611,22 @@ def upload_rclone(file_path):
         
         rclone_file_path = f'{base_path}/{file_name}'
         
-        # Upload with progress
+        # Upload with progress (non-blocking)
         process = subprocess.Popen(
-            ['rclone', 'copy', upload_file, rclone_dest, '--progress', '--stats', '1s'],
+            ['rclone', 'copy', upload_file, rclone_dest, '--progress', '--stats', '5s'],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
         )
         
+        last_output_time = time.time()
         for line in process.stdout:
             line = line.strip()
             if line and any(x in line for x in ['Transferred:', '%', 'ETA']):
-                print(f"   {line}")
+                # Throttle output to avoid blocking
+                if time.time() - last_output_time > 2:
+                    print(f"   {line}")
+                    last_output_time = time.time()
         
-        process.wait()
+        process.wait(timeout=3600)  # 1 hour timeout
         
         # Cleanup temp file
         if upload_file != file_path:
@@ -674,8 +639,11 @@ def upload_rclone(file_path):
         print("✅ Upload complete!")
         
         # Get shareable link
-        result = subprocess.run(['rclone', 'link', rclone_file_path], capture_output=True, text=True)
+        result = subprocess.run(['rclone', 'link', rclone_file_path], capture_output=True, text=True, timeout=30)
         return result.stdout.strip() if result.returncode == 0 else rclone_file_path
+    except subprocess.TimeoutExpired:
+        print("❌ Upload timeout!")
+        return None
     except Exception as e:
         print(f"❌ Error: {e}")
         return None
@@ -716,7 +684,7 @@ def upload_termbin(file_path):
         stdout, stderr = process.communicate(input=content, timeout=30)
         
         if process.returncode == 0 and stdout.strip():
-            url = stdout.strip()
+            url = stdout.strip().replace('\n', '').replace('\r', '')
             print(f"✅ Termbin URL: {url}")
             return url
         else:
@@ -1073,7 +1041,7 @@ def main():
         
         # Upload OTA JSON for AxionAOSP builds
         ota_json_url = None
-        if ROM_TYPE.startswith('axion-'):
+        if ROM_TYPE.startswith('axion-') and UPLOAD_OTA_JSON:
             gms_type = ROM_TYPE.split('-')[1]
             # Map pico/core to GMS, vanilla to VANILLA
             ota_dir = 'GMS' if gms_type in ['pico', 'core'] else 'VANILLA'
@@ -1081,23 +1049,16 @@ def main():
             ota_json_path = os.path.join(OUT_DIR, ota_dir, f'{DEVICE}.json')
             
             if os.path.exists(ota_json_path):
-                if UPLOAD_OTA_JSON:
-                    # Upload OTA JSON content to termbin.com
-                    print(f"📤 Uploading OTA JSON ({ota_dir}) to termbin.com...")
-                    termbin_url = upload_termbin(ota_json_path)
-                    if termbin_url:
-                        ota_json_url = termbin_url
-                        print(f"✅ OTA JSON termbin URL: {ota_json_url}")
-                else:
-                    # Fallback: upload via rclone/GoFile
-                    print(f"📤 Uploading OTA JSON ({ota_dir})...")
-                    ota_json_url = upload_file(ota_json_path)
-                    if ota_json_url:
-                        print(f"✅ OTA JSON uploaded: {ota_json_url}")
+                # Upload OTA JSON content to termbin.com only
+                print(f"📤 Uploading OTA JSON ({ota_dir}) to termbin.com...")
+                termbin_url = upload_termbin(ota_json_path)
+                if termbin_url:
+                    ota_json_url = termbin_url
+                    print(f"✅ OTA JSON termbin URL: {ota_json_url}")
             else:
                 print(f"⚠️  OTA JSON not found at: {ota_json_path}")
-        else:
-            # Generate OTA JSON for non-Axion ROMs
+        elif UPLOAD_OTA_JSON:
+            # Generate OTA JSON for non-Axion ROMs (only if UPLOAD_OTA_JSON is enabled)
             print("📝 Generating OTA JSON...")
             
             # Extract version from filename or use Android version
@@ -1129,18 +1090,12 @@ def main():
             
             print(f"✅ OTA JSON generated: {ota_json_path}")
             
-            # Upload OTA JSON: termbin (if enabled) or regular upload
-            if UPLOAD_OTA_JSON:
-                print("📤 Uploading OTA JSON to termbin.com...")
-                termbin_url = upload_termbin(ota_json_path)
-                if termbin_url:
-                    ota_json_url = termbin_url
-                    print(f"✅ OTA JSON termbin URL: {ota_json_url}")
-            else:
-                print("📤 Uploading OTA JSON...")
-                ota_json_url = upload_file(ota_json_path)
-                if ota_json_url:
-                    print(f"✅ OTA JSON uploaded: {ota_json_url}")
+            # Upload OTA JSON to termbin.com only
+            print("📤 Uploading OTA JSON to termbin.com...")
+            termbin_url = upload_termbin(ota_json_path)
+            if termbin_url:
+                ota_json_url = termbin_url
+                print(f"✅ OTA JSON termbin URL: {ota_json_url}")
         
         # Final success message
         success_msg = f"""<b>✅ {ROM_NAME} Build Complete!</b>
@@ -1159,14 +1114,32 @@ def main():
         
         # Add OTA JSON link if available
         if ota_json_url:
-            success_msg += f"\n\n<b>📱 OTA JSON:</b> <a href=\"{ota_json_url}\">Download</a>"
+            # Escape the URL to prevent HTML parsing issues
+            escaped_url = html_escape(ota_json_url, quote=False)
+            success_msg += f"\n\n<b>📱 OTA JSON:</b> <a href=\"{escaped_url}\">Download</a>"
         
         download_buttons = create_download_buttons(rom_url, boot_images if boot_images else None)
         
-        (edit_photo_caption if use_banner else edit_message)(build_message_id, success_msg, reply_markup=download_buttons)
+        print("\n📤 Sending success message to Telegram...")
+        result = (edit_photo_caption if use_banner else edit_message)(build_message_id, success_msg, reply_markup=download_buttons)
+        if result:
+            print("✅ Success message sent!")
+        else:
+            print("❌ Failed to send success message!", file=sys.stderr)
+        
+        # Pin the success message if enabled
+        if PIN_SUCCESS_MESSAGE:
+            print("📌 Pinning success message...")
+            result = pin_message(build_message_id)
+            if result:
+                print("✅ Message pinned!")
+            else:
+                print("❌ Failed to pin message!", file=sys.stderr)
         
         if os.path.exists(BUILD_LOG):
+            print("📤 Sending build log to Telegram...")
             send_file(BUILD_LOG)
+            print("✅ Build log sent!")
     
     # Cleanup
     print("\n🧹 Cleaning up temporary files...")
