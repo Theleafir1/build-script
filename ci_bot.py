@@ -381,16 +381,21 @@ def pin_message(message_id, chat_id=None):
 
 def create_download_buttons(rom_url, boot_images=None):
     """Create inline keyboard with download buttons"""
-    buttons = [[{"text": "📥 Download ROM", "url": rom_url}]]
+    buttons = []
+    
+    # Only add ROM button if URL is valid
+    if rom_url and rom_url.startswith('http'):
+        buttons.append([{"text": "📥 Download ROM", "url": rom_url}])
     
     if boot_images:
         boot_row = []
         for img_name, img_url in boot_images.items():
-            button_text = img_name.replace('.img', '').replace('_', ' ').title()
-            boot_row.append({"text": button_text, "url": img_url})
-            if len(boot_row) == 2:
-                buttons.append(boot_row)
-                boot_row = []
+            if img_url and img_url.startswith('http'):
+                button_text = img_name.replace('.img', '').replace('_', ' ').title()
+                boot_row.append({"text": button_text, "url": img_url})
+                if len(boot_row) == 2:
+                    buttons.append(boot_row)
+                    boot_row = []
         if boot_row:
             buttons.append(boot_row)
     
@@ -685,6 +690,9 @@ def upload_termbin(file_path):
         
         if process.returncode == 0 and stdout.strip():
             url = stdout.strip().replace('\n', '').replace('\r', '')
+            # Ensure it's a valid URL
+            if 'termbin.com' in url and not url.startswith('http'):
+                 url = f"https://{url}"
             print(f"✅ Termbin URL: {url}")
             return url
         else:
@@ -1097,26 +1105,35 @@ def main():
                 ota_json_url = termbin_url
                 print(f"✅ OTA JSON termbin URL: {ota_json_url}")
         
-        # Final success message
-        success_msg = f"""<b>✅ {ROM_NAME} Build Complete!</b>
+        # Final success message - Escape all dynamic content for HTML safety
+        e_rom_name = html_escape(ROM_NAME)
+        e_device = html_escape(DEVICE)
+        e_version = html_escape(ANDROID_VERSION)
+        e_type = 'Official' if CONFIG_OFFICIAL_FLAG == '1' else 'Unofficial'
+        e_variant = html_escape(VARIANT)
+        e_stats = html_escape(build_stats)
+        e_filename = html_escape(rom_filename)
+        e_md5 = html_escape(md5_hash.hexdigest())
+        
+        success_msg = f"""<b>✅ {e_rom_name} Build Complete!</b>
 
-<b>Device:</b> {DEVICE} | <b>Android:</b> {ANDROID_VERSION}
-<b>Type:</b> {'Official' if CONFIG_OFFICIAL_FLAG == '1' else 'Unofficial'} | <b>Build Type:</b> {VARIANT}
+<b>Device:</b> {e_device} | <b>Android:</b> {e_version}
+<b>Type:</b> {e_type} | <b>Build Type:</b> {e_variant}
 
 <b>📊 Build Stats:</b>
 <b>• Duration:</b> {hours} hour(s), {minutes} minute(s), {seconds} second(s)
-<b>• Actions:</b> {build_stats}
+<b>• Actions:</b> {e_stats}
 
 <b>🔧 Configuration:</b>
-<b>• File:</b> <code>{rom_filename}</code>
+<b>• File:</b> <code>{e_filename}</code>
 <b>• Size:</b> {size_gb:.2f} GiB
-<b>• MD5:</b> <code>{md5_hash.hexdigest()}</code>"""
+<b>• MD5:</b> <code>{e_md5}</code>"""
         
         # Add OTA JSON link if available
         if ota_json_url:
-            # Escape the URL to prevent HTML parsing issues
-            escaped_url = html_escape(ota_json_url, quote=False)
-            success_msg += f"\n\n<b>📱 OTA JSON:</b> <a href=\"{escaped_url}\">Download</a>"
+            clean_url = ota_json_url.strip()
+            # Simplified format: Link covers the text, no separate bold label
+            success_msg += f'\n\n<a href="{clean_url}">📱 Download OTA JSON</a>'
         
         download_buttons = create_download_buttons(rom_url, boot_images if boot_images else None)
         
