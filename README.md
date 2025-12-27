@@ -9,25 +9,25 @@ cd /path/to/your/rom/source
 - Download the script using wget
 
 ```bash
-wget https://raw.githubusercontent.com/Saikrishna1504/build-script/main/ci_bot.py
+wget https://raw.githubusercontent.com/theleafir1/build-script/main/bot.py
 ```
 
 Or alternatively using curl:
 
 ```bash
-curl -O https://raw.githubusercontent.com/Saikrishna1504/build-script/main/ci_bot.py
+curl -O https://raw.githubusercontent.com/theleafir1/build-script/main/bot.py
 ```
 
 - Make it executable
 
 ```bash
-chmod +x ci_bot.py
+chmod +x bot.py
 ```
 
 - Edit the script and update the variables
 
 ```bash
-nano ci_bot.py
+nano bot.py
 ```
 
 - Update the configuration variables (see Variables section below)
@@ -35,7 +35,7 @@ nano ci_bot.py
 - Run the script
 
 ```bash
-python3 ci_bot.py -h
+python3 bot.py -h
 ```
 
 - Done
@@ -55,32 +55,14 @@ VARIANT = ""
 #            For AxionAOSP use: "axion-pico" / "axion-core" / "axion-vanilla"
 ROM_TYPE = ""
 
-# Official build flag : Set to "1" for official builds, leave empty for unofficial
-CONFIG_OFFICIAL_FLAG = ""
-
 # Your telegram group/channel chatid eg - "-xxxxxxxx"
 CONFIG_CHATID = ""
 
 # Your HTTP API bot token (get it from botfather) 
 CONFIG_BOT_TOKEN = ""
 
-# Set the Secondary chat/channel ID (It will only send error logs to that)
-CONFIG_ERROR_CHATID = ""
-
-# Set your rclone remote for uploading with rclone
-RCLONE_REMOTE = ""
-
-# Set your rclone folder name for uploading with rclone
-RCLONE_FOLDER = ""
-
 # Turn off server after build (save resource) [False/True]
 POWEROFF = False
-
-# Upload OTA JSON to termbin.com [True/False]
-UPLOAD_OTA_JSON = True
-
-# Custom JSON path, leave empty for axion, it only works if UPLOAD_OTA_JSON is set to true
-OTA_JSON_PATH = "vendor/ota/your_device_name.json"
 
 # Pin success message in chat [True/False]
 PIN_SUCCESS_MESSAGE = True
